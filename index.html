@@ -168,7 +168,7 @@ input:disabled, select:disabled { background: var(--surface-2); color: var(--mut
 // Leave both empty to run on this computer only (demo mode, no login).
 const SUPABASE_URL = 'https://fsvdtgzkzjngykdetwah.supabase.co';       // e.g. https://abcdefgh.supabase.co
 const SUPABASE_KEY = 'sb_publishable_iUePfwGqClXW6k2ETtIGdQ_kwaWio_F';  // Supabase: Settings > API Keys > Publishable key (sb_publishable_…)
-const LOGIN_DOMAIN = 'salgado-planner.app'; // login name "SBbudgetplanner" = fmbudgetplanner@salgado-planner.app in Supabase
+const LOGIN_DOMAIN = 'salgado-planner.app'; // login name "SBbudgetplanner" = SBbudgetplanner@salgado-planner.app in Supabase
 
 // ---------- Small helpers ----------
 const $ = (s, r = document) => r.querySelector(s);
@@ -788,7 +788,7 @@ const afterRender = [];
 
 function loginHtml() {
   return `<div class="login"><div class="card"><h1>Salgado Budget Planner</h1><p class="note">Sign in with the team login.</p>
-    <form id="login-form"><label>Login name<input class="txt" id="lg-user" autocomplete="username" value="FMbudgetplanner"></label>
+    <form id="login-form"><label>Login name<input class="txt" id="lg-user" autocomplete="username" value="SBbudgetplanner"></label>
     <label>Password<input class="txt" type="password" id="lg-pass" autocomplete="current-password"></label>
     <p class="note" id="lg-err" style="color:var(--bad)"></p><button class="btn primary" type="submit">Sign in</button></form></div></div>`;
 }
