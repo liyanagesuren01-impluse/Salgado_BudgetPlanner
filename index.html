@@ -251,7 +251,7 @@ function toast(msg) {
 // Storage: one key-value table. Local (this browser) or Supabase (shared).
 // =====================================================================
 const Store = {
-  mode: 'local', data: {}, rev: 0, session: null, lastSync: null, pending: 0, error: '', onChange: null,
+  mode: 'local', data: {}, rev: 0, mine: {}, inflight: {}, session: null, lastSync: null, pending: 0, error: '', onChange: null,
   remoteConfigured() { return !!(SUPABASE_URL && SUPABASE_KEY); },
   get(k) { return this.data[k] ?? null; },
   keys(prefix) { return Object.keys(this.data).filter(k => k.startsWith(prefix)); },
@@ -296,7 +296,12 @@ const Store = {
     this.pending++; this.error = ''; this.onChange && this.onChange('sync');
     const now = new Date().toISOString();
     try {
-      await this.api('/rest/v1/kv', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify(rows.map(r => ({ key: r.key, value: r.value, updated_at: now, updated_by: this.session ? this.session.user : '' }))) });
+      rows.forEach(r => { this.inflight[r.key] = (this.inflight[r.key] || 0) + 1; });
+      try {
+        const res = await this.api('/rest/v1/kv?select=key,updated_at', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=representation' }, body: JSON.stringify(rows.map(r => ({ key: r.key, value: r.value, updated_at: now, updated_by: this.session ? this.session.user : '' }))) });
+        const back = await res.json().catch(() => []);
+        (Array.isArray(back) ? back : []).forEach(x => { if (x.key && x.updated_at && !(this.mine[x.key] > x.updated_at)) this.mine[x.key] = x.updated_at; });
+      } finally { rows.forEach(r => { if (!--this.inflight[r.key]) delete this.inflight[r.key]; }); }
       return true;
     } catch (e) { this.error = 'Not saved: ' + e.message; toast('Could not save to the shared database. Check the internet connection and try again.'); return false; }
     finally { this.pending--; this.onChange && this.onChange('sync'); }
@@ -306,7 +311,8 @@ const Store = {
     try {
       const r = await this.api(`/rest/v1/kv?select=key,value,updated_at&updated_at=gt.${encodeURIComponent(this.lastSync)}&order=updated_at`);
       const rows = await r.json(); if (!rows.length) return;
-      rows.forEach(x => { if (x.value === null) delete this.data[x.key]; else this.data[x.key] = x.value; if (x.updated_at > this.lastSync) this.lastSync = x.updated_at; });
+      // Skip a row for a key we are still saving, or an older copy of something we saved since (it would undo our change on screen).
+      rows.forEach(x => { if (x.updated_at > this.lastSync) this.lastSync = x.updated_at; if (this.inflight[x.key] || (this.mine[x.key] && x.updated_at <= this.mine[x.key])) return; if (x.value === null) delete this.data[x.key]; else this.data[x.key] = x.value; });
       this.bump(); this.onChange && this.onChange('remote');
     } catch (e) { this.error = 'Connection problem: ' + e.message; this.onChange && this.onChange('sync'); }
   },
@@ -675,6 +681,9 @@ const planRegRec = rid => (Store.get('planR:' + rid) || { m: {} }).m;
 // Selling price and raw material inflation, set for a region in a month (one change for all categories and/or per category).
 function priceInfl(rid, ym) { const p = planRegRec(rid)[ym] || {}; return { price: p.price || {}, infl: p.infl || {} }; }
 const factorOf = (obj, c) => (1 + num(obj._all) / 100) * (1 + (c ? num(obj[c]) : 0) / 100);
+// This month's price / inflation factors for one unit and category. Typed sales and RM % are stored before these, so a later price or inflation change still moves them.
+const salesFactor = (u, ym, c) => factorOf(priceInfl(u.regionId, ym).price, c);
+const rmFactor = (u, ym, c) => { const pf = priceInfl(u.regionId, ym); return isRest(u) ? factorOf(pf.infl) / factorOf(pf.price) : factorOf(pf.infl, c) / factorOf(pf.price, c); };
 // Effective inputs for one unit-month: sales and RM% default to the previous month (actual if entered), moved by any price / inflation change this month; cost levers carry forward.
 function planInputs(u, ym) {
   return Engine.m(`pi:${u.id}:${ym}`, () => {
@@ -692,12 +701,12 @@ function planInputs(u, ym) {
     const o = { salesC: {}, rmPct: {}, adj: {}, heads: {}, salary: {}, capex: num(p.capex), maint: num(p.maint), ovr: {}, prevFrom, prevS, prevR };
     for (const c of u.cats) {
       const pc = isRest(u) ? factorOf(pf.price, c) : factorOf(pf.price, c), ic = isRest(u) ? factorOf(pf.infl) : factorOf(pf.infl, c);
-      o.salesC[c] = isNum((p.sales || {})[c]) ? +p.sales[c] : num(prevS[c]) * pc;
+      o.salesC[c] = (isNum((p.sales || {})[c]) ? +p.sales[c] : num(prevS[c])) * pc;
       if (isNum((p.sales || {})[c])) o.ovr['sales.' + c] = true;
       const pr = isNum(prevR[c]) ? +prevR[c] : (prevPI ? prevPI.rmPct[c] : bp.rm[c]);
       const rk = isRest(u) ? '_all' : c;
       const moved = (isNum(pr) ? +pr : bp.rm[c]) * (isRest(u) ? factorOf(pf.infl) / factorOf(pf.price) : ic / pc);
-      o.rmPct[c] = isNum((p.rmPct || {})[rk]) ? +p.rmPct[rk] : moved;
+      o.rmPct[c] = isNum((p.rmPct || {})[rk]) ? +p.rmPct[rk] * (isRest(u) ? factorOf(pf.infl) / factorOf(pf.price) : ic / pc) : moved;
       if (isNum((p.rmPct || {})[rk])) o.ovr['rm.' + rk] = true;
     }
     if (isRest(u)) o.rmPct._all = u.cats.length ? o.rmPct[u.cats[0]] : bp.rm._all;
@@ -841,6 +850,10 @@ function regionBench(rid, ym, src = 'actual') {
 }
 
 // ---------- Budget ----------
+// Compare actuals with the approved budget; months it doesn't cover use the plan (labelled "Plan").
+const inBudget = ym => { const b = currentBudget(); return !!(b && b.months.includes(ym)); };
+const budgetOrPlan = () => 'bp';
+const bpLabel = ms => ms.every(inBudget) ? 'Budget' : ms.some(inBudget) ? 'Budget / plan' : 'Plan';
 const currentBudget = () => { const c = CFG(); return c && c.budgetId ? Store.get('budget:' + c.budgetId) : null; };
 function snapshotBudget(name, ms = months()) {
   const c = CFG(), data = {}, extras = { staff: [], capex: [], openings: [] };
@@ -867,6 +880,7 @@ function unitL(u, ym, kind) {
   if (kind === 'benchB') return regionBench(u.regionId, ym, currentBudget() ? 'budget' : 'plan')[u.id] || null;
   if (kind === 'base') return baseRegionPL(u.regionId)[u.id] || null;
   if (kind === 'budget') { const b = currentBudget(); return b && b.data[u.id] ? b.data[u.id][ym] || null : null; }
+  if (kind === 'bp') return inBudget(ym) ? unitL(u, ym, 'budget') : unitL(u, ym, 'plan');
   return null;
 }
 function scopeL(scope, ym, kind, only) {
@@ -1011,6 +1025,7 @@ const ui = {
 // Period pickers: "from + number of months" (planner, budget) or "from + to" (what-if, variance).
 function perGet(key) {
   const p = ui.per[key], ms = selectableMonths();
+  if (key === 'wi' && !p) { const bm = perMonths('bud'); return { from: bm[0], to: bm[bm.length - 1] }; } // what-if tests the whole budget period unless changed
   if (key === 'bud') { const b = currentBudget(); const d = b ? { from: b.months[0], n: b.months.length } : { from: CFG().plan.start, n: num(CFG().plan.n) || 12 }; return p || d; }
   return p || { from: ui.ym, to: ui.ym };
 }
@@ -1119,13 +1134,13 @@ function headerHtml() {
     ${ui.setup ? '' : kpiHtml() + `<nav class="tabs" role="tablist">${TABS.map(([id, l, later]) => `<button role="tab" data-act="tab" data-id="${id}" aria-selected="${ui.tab === id}">${esc(l)}${later ? `<span class="later">${later}</span>` : ''}</button>`).join('')}</nav>`}</header>`;
 }
 function kpiHtml() {
-  const ym = ui.ym, B = scopeL(ui.scope, ym, 'budget'), A = scopeL(ui.scope, ym, 'actual'), meta = actualMeta(ui.scope, ym), b = currentBudget(), BL = A ? scopeL(ui.scope, ym, 'budget', reportedSet(ui.scope, ym)) : null;
+  const ym = ui.ym, B = scopeL(ui.scope, ym, 'bp'), A = scopeL(ui.scope, ym, 'actual'), meta = actualMeta(ui.scope, ym), b = currentBudget(), BL = A ? scopeL(ui.scope, ym, 'bp', reportedSet(ui.scope, ym)) : null, bw = inBudget(ym) ? 'Budgeted' : 'Planned';
   const est = meta.weekly.length ? ' · <span class="pill warn">part from weekly</span>' : '';
   const vs = (k, a, bb) => { if (a == null || bb == null) return ''; const v = varianceOf(k, bb, a); return `<span class="pill ${statusOf(v) === 'good' ? 'good' : statusOf(v) === 'amber' ? 'warn' : 'bad'}">${spct(v.pct)}</span>`; };
   return `<div class="kpis">
-    <div class="kpi"><div class="lab">Budgeted sales · ${monthLabel(ym)}</div><div class="v">${B ? money(B.sales) : '—'}</div><div class="sub">${b ? esc(b.name) : 'No approved budget yet'}</div></div>
+    <div class="kpi"><div class="lab">${bw} sales · ${monthLabel(ym)}</div><div class="v">${B ? money(B.sales) : '—'}</div><div class="sub">${inBudget(ym) ? esc(b.name) : 'Plan · not in an approved budget'}</div></div>
     <div class="kpi"><div class="lab">Actual sales · ${monthLabel(ym)}</div><div class="v">${A ? money(A.sales) : '—'}</div><div class="sub">${A ? vs('sales', A.sales, BL && BL.sales) + est : 'Nothing entered yet'}</div></div>
-    <div class="kpi"><div class="lab">Budgeted net profit</div><div class="v${B && B.np < 0 ? ' neg' : ''}">${B ? money(B.np) : '—'}</div><div class="sub">${B && B.sales ? pct(B.np / B.sales) + ' of sales' : ''}</div></div>
+    <div class="kpi"><div class="lab">${bw} net profit</div><div class="v${B && B.np < 0 ? ' neg' : ''}">${B ? money(B.np) : '—'}</div><div class="sub">${B && B.sales ? pct(B.np / B.sales) + ' of sales' : ''}</div></div>
     <div class="kpi"><div class="lab">Actual net profit</div><div class="v${A && A.np < 0 ? ' neg' : ''}">${A ? money(A.np) : '—'}</div><div class="sub">${A ? (A.sales ? pct(A.np / A.sales) + ' of sales ' : '') + vs('np', A.np, BL && BL.np) + (meta.missingLines.length || meta.missingUnits.length || meta.regMissing.length ? ' · <span class="pill warn">incomplete</span>' : '') : ''}</div></div></div>`;
 }
 function menuHtml() {
@@ -1192,7 +1207,7 @@ function overviewData() {
 }
 const BENCH_ITEMS = [['Production salaries to sales', L => L.prod], ['Sales staff to sales', L => L.ss], ['Branch overheads to sales', L => L.oh + L.bm]];
 function benchPctData() {
-  const sc = ui.scope, ym = ui.ym, A = scopeL(sc, ym, 'actual'), B = A ? scopeL(sc, ym, 'budget', reportedSet(sc, ym)) : scopeL(sc, ym, 'budget') || scopeL(sc, ym, 'plan');
+  const sc = ui.scope, ym = ui.ym, A = scopeL(sc, ym, 'actual'), B = A ? scopeL(sc, ym, 'bp', reportedSet(sc, ym)) : scopeL(sc, ym, 'bp');
   const K = A ? scopeL(sc, ym, 'bench') : scopeL(sc, ym, 'benchB');
   return BENCH_ITEMS.map(([label, f]) => { const k = K && K.sales ? f(K) / K.sales : null, b = B && B.sales ? f(B) / B.sales : null, a = A && A.sales ? f(A) / A.sales : null;
     return { label, k, b, a, bi: k && b != null ? b / k : null, ai: k && a != null ? a / k : null }; });
@@ -1200,7 +1215,7 @@ function benchPctData() {
 VIEWS.overview = {
   main() {
     const sc = ui.scope, D = overviewData(), hasB = !!currentBudget(), bp = benchPctData(), rest = scopeAllRest(sc);
-    const only = reportedSet(sc, ui.ym), A = scopeL(sc, ui.ym, 'actual'), B = A ? scopeL(sc, ui.ym, 'budget', only) : scopeL(sc, ui.ym, 'budget'), K = scopeL(sc, ui.ym, 'bench');
+    const only = reportedSet(sc, ui.ym), A = scopeL(sc, ui.ym, 'actual'), B = A ? scopeL(sc, ui.ym, 'bp', only) : scopeL(sc, ui.ym, 'bp'), K = scopeL(sc, ui.ym, 'bench');
     const top = (X, label) => {
       if (!A || !X) return `<p class="note">${A ? 'No ' + label + ' figures for this month.' : 'No actuals entered for this month yet.'}</p>`;
       const ra = ratioRows(A, { rest }), rx = Object.fromEntries(ratioRows(X, { rest }).map(r => [r.k, r]));
@@ -1219,7 +1234,7 @@ VIEWS.overview = {
       <div class="grid2"><div class="card"><h2>Distributable cost as % of sales</h2><p class="note">Production salaries + 50% of branch overheads + regional (back office) costs.</p>${comboChart(ms, [{ label: 'Benchmark', color: 'var(--brown)', dash: true, vals: D.map(d => d.dK) }, { label: 'Actual', color: 'var(--brown)', vals: D.map(d => d.dA) }], [], { small: true, pct: true })}</div>
         <div class="card"><h2>${monthLabel(ui.ym)} · budget vs actual</h2>${metaNotes(sc, ui.ym)}
         ${B || A ? `<table class="zebra"><thead><tr><th></th><th>Budget</th><th>Actual</th><th>Variance</th></tr></thead><tbody>${['sales', 'gp', 'gc', ...(rest ? [] : ['nc']), 'pbt', 'np'].map(k => { const b = B ? getV(B, k) : null, a = A ? getV(A, k) : null, v = varianceOf(k, b, a); return `<tr class="${k === 'np' ? 'total' : ''}"><td>${esc(lineLabel(k))}</td><td data-v="${b ?? ''}">${money(b)}</td><td data-v="${a ?? ''}">${money(a)}</td><td>${v ? `${money(v.diff)} ${statusPill(statusOf(v))}` : '—'}</td></tr>`; }).join('')}</tbody></table>` : '<p class="note">No budget or actual figures for this month.</p>'}</div></div>
-      <div class="grid2"><div class="card"><h2>Biggest gaps against budget · ${monthLabel(ui.ym)}</h2>${top(B, 'budget')}</div><div class="card"><h2>Biggest gaps against benchmarks · ${monthLabel(ui.ym)}</h2>${top(K, 'benchmark')}</div></div>
+      <div class="grid2"><div class="card"><h2>Biggest gaps against ${inBudget(ui.ym) ? 'budget' : 'plan'} · ${monthLabel(ui.ym)}</h2>${top(B, inBudget(ui.ym) ? 'budget' : 'plan')}</div><div class="card"><h2>Biggest gaps against benchmarks · ${monthLabel(ui.ym)}</h2>${top(K, 'benchmark')}</div></div>
       <div class="card"><h2>Overdue tasks</h2>${tasks.length ? `<div class="list">${tasks.slice(0, 6).map(t => `<div class="item"><div class="t">${esc(t.title)}</div><div class="meta"><span>${esc(t.where || '')}</span><span class="neg">due ${fmtDate(t.due)}</span><span>${esc(t.owner || 'no owner')}</span></div></div>`).join('')}</div>${tasks.length > 6 ? `<p class="note">…and ${tasks.length - 6} more on Decisions & actions.</p>` : ''}` : '<p class="note">Nothing overdue.</p>'}</div>`;
   },
   sheets() {
@@ -1521,9 +1536,11 @@ function whatIfHtml(which) {
 function whatIfCard(kind, which) {
   const w = ui[which]; if (!whatIfActive(w)) return '';
   const ms = wiMonths(which), sc = ui.scope;
-  const base = sumL(ms.map(m => scopeL(sc, m, kind)).filter(Boolean)), wi = sumL(ms.map(m => scopeWhatIf(sc, m, kind, w)).filter(Boolean));
+  const kOf = m => typeof kind === 'function' ? kind(m) : kind;
+  const base = sumL(ms.map(m => scopeL(sc, m, kOf(m))).filter(Boolean)), wi = sumL(ms.map(m => scopeWhatIf(sc, m, kOf(m), w)).filter(Boolean));
+  if (typeof kind === 'function') kind = ms.every(m => kOf(m) === 'budget') ? 'budget' : ms.some(m => kOf(m) === 'budget') ? 'budget and plan' : 'plan';
   if (!base.n) return `<div class="card"><h2>What-if</h2><p class="note">No ${kind} figures to test against in ${wiLabel(which)}.</p></div>`;
-  const label = kind === 'budget' ? 'Budget' : kind === 'plan' ? 'Plan' : 'Actual';
+  const label = kind === 'budget' ? 'Budget' : kind === 'plan' ? 'Plan' : kind === 'budget and plan' ? 'Budget & plan' : 'Actual';
   return `<div class="card" data-print="whatif"><header><h2>What-if · ${wiLabel(which)}</h2><span class="note">${kind === 'actual' ? 'What we would have made with these changes' : 'Not saved'}</span></header><p class="note">${esc(whatIfText(w))}</p>
     ${plTable([{ label, L: base }, { label: 'What-if', L: wi }], { staff: kind === 'actual' ? foldPay() : true, rest: scopeAllRest(sc), variance: [0, 1], noStatus: true })}</div>`;
 }
@@ -1537,12 +1554,12 @@ VIEWS.budgets = {
     const kindOf = m => inB(m) ? 'budget' : 'plan';
     const Ls = ms.map(m => scopeL(sc, m, kindOf(m))), T = sumL(Ls.filter(Boolean));
     const mixed = b && ms.some(m => !inB(m)), same = b && ms.length === b.months.length && ms.every(inB);
-    const head = `<div class="card"><header><div><h2>${b ? esc(b.name) : 'No approved budget yet'}</h2><p class="note">${b ? `Approved ${fmtDate(b.approvedAt)} · ${monthLabel(b.months[0])} – ${monthLabel(b.months[b.months.length - 1])} · locked. ` : 'Below is the Monthly plan for the chosen months. '}${esc(scopeName(sc))}.</p></div>
+    const head = `<div class="card"><header><div><h2>${same ? 'Budget' : b && !mixed ? 'Budget' : b && ms.some(inB) ? 'Budget and plan' : 'Plan'} · ${perLabel('bud')}</h2><p class="note">${b ? `Approved budget: <b>${esc(b.name)}</b> (${monthLabel(b.months[0])} – ${monthLabel(b.months[b.months.length - 1])}), approved ${fmtDate(b.approvedAt)}, locked. ` : 'No approved budget yet: below is the Monthly plan for the chosen months. '}${esc(scopeName(sc))}.</p></div>
       <div class="btns">${same ? '<button class="btn" data-act="approve">Approve a new budget (PIN)</button>' : `<button class="btn primary" data-act="approve">${b ? 'Replace the budget with the plan for ' : 'Approve the plan as the budget for '}${perLabel('bud')}${b ? ' (PIN)' : ''}</button>`}</div></header>
       ${mixed ? `<div class="callout warn">Months outside the approved budget (${ms.filter(m => !inB(m)).map(monthLabel).join(', ')}) show the plan.</div>` : ''}
       <p class="note">Branch manager pay is inside branch overheads, regional manager pay inside back office staff, chef pay inside production staff.</p></div>`;
     const table = `<div class="card"><header><h2>${b && !mixed ? 'Budget' : b ? 'Budget and plan' : 'Plan'} · ${perLabel('bud')}${ui.daily ? ' · per day' : ''}</h2>${daySeg()}</header>${monthlyTable(Ls, T, { staff: true, rest: scopeAllRest(sc), months: ms })}</div>`;
-    return head + whatIfCard(b ? 'budget' : 'plan', 'wiB') + table + extrasCard(b, ms);
+    return head + table + whatIfCard(kindOf, 'wiB') + extrasCard(b, ms);
   },
 };
 function monthlyTable(Ls, T, opts) {
@@ -1571,7 +1588,8 @@ function extrasCard(b, ms) {
 const ACT_LINES = u => [...(isRest(u) ? [] : ['wastage']), 'gaspack', 'branchExp', 'ss', ...(isRest(u) ? ['chef'] : []), 'oh', 'maint', ...(isUnlocked() ? ['bm'] : []), ...(isRest(u) ? REG_LINES.filter(k => k !== 'rmSal' || isUnlocked()) : []), 'capex'];
 const actLabel = k => k === 'oh' ? (isUnlocked() ? 'Branch overheads (without maintenance)' : 'Branch overheads (incl. branch manager pay, without maintenance)') : k === 'bo' && !isUnlocked() ? 'Back office staff (incl. regional manager pay)' : k === 'maint' ? 'Maintenance' : k === 'chef' ? 'Chef salary' : lineLabel(k);
 // Months that can be entered: from 2 months before the plan starts up to the current month.
-function entryMonths() { const start = ymAdd(CFG().plan.start, -2), end = [thisYm(), CFG().plan.start].sort().pop(); return monthRange(start, monthDiff(start, end) + 1); }
+// Actuals open for months up to next month. A director can open later plan months too (e.g. to try the system with test figures).
+function entryMonths() { const ms = months(), start = ymAdd(CFG().plan.start, -2), end = isUnlocked() ? [ms[ms.length - 1], ymAdd(thisYm(), 1)].sort().pop() : [ymAdd(thisYm(), 1), CFG().plan.start].sort().pop(); return monthRange(start, monthDiff(start, end) + 1); }
 function periodOptions() {
   const ms = entryMonths();
   if (ui.actType === 'month') return ms.map(m => ['m:' + m, monthLabel(m)]).reverse();
@@ -1602,7 +1620,7 @@ VIEWS.actuals = {
 };
 function statusCard(sc, picker = true) {
   const ym = entryMonth(), us = scopeUnits(sc).filter(u => openIn(u, ym)), m = actualMeta(sc, ym);
-  return `<div class="card"><header><h2>Who has entered ${monthLabel(ym)}</h2>${picker ? seg('acttype', ui.actType, [['week', 'Week'], ['month', 'Month']]) : ''}</header>${picker ? `<div class="btns" style="margin-bottom:8px"><select id="act-period" data-ch="actperiod" aria-label="Period">${periodOptions().map(([k, l]) => `<option value="${k}"${k === curPeriod() ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></div>` : ''}<div class="tw"><table><thead><tr><th>Branch</th><th>Figures</th><th>Month locked</th><th class="l">Lines left empty</th><th></th></tr></thead><tbody>
+  return `<div class="card"><header><h2>Who has entered ${monthLabel(ym)}</h2>${picker ? seg('acttype', ui.actType, [['week', 'Week'], ['month', 'Month']]) : ''}</header>${picker ? `<div class="btns" style="margin-bottom:8px"><select id="act-period" data-ch="actperiod" aria-label="Period">${periodOptions().map(([k, l]) => `<option value="${k}"${k === curPeriod() ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>${isUnlocked() ? '<span class="note">Later months open (director).</span>' : '<button class="btn sm" data-act="unlock" data-level="director" title="Lets a director enter figures for later plan months, e.g. to test">Open later months (director)</button>'}</div>` : ''}<div class="tw"><table><thead><tr><th>Branch</th><th>Figures</th><th>Month locked</th><th class="l">Lines left empty</th><th></th></tr></thead><tbody>
     ${m.rows.map(r => `<tr><td>${esc(r.u.name)}</td><td>${r.src === 'none' ? '<span class="pill bad">Not entered</span>' : r.src === 'weekly' ? `<span class="pill warn">Weekly · ${r.covered}/${r.days} days</span>` : '<span class="pill good">Month entered</span>'}</td><td>${r.submitted ? '🔒 Yes' : 'No'}</td><td class="l note" style="white-space:normal">${r.missing && r.missing.length ? esc(r.missing.join(', ')) : ''}</td><td><button class="btn sm" data-act="scope" data-kind="unit" data-id="${r.u.id}">Enter</button></td></tr>`).join('')}
     ${m.regions.map(x => `<tr><td>${esc(regionById(x.rid).name)} · regional costs</td><td>${x.a ? (x.a.src === 'weekly' ? '<span class="pill warn">Weekly</span>' : '<span class="pill good">Month entered</span>') : '<span class="pill bad">Not entered</span>'}</td><td>${x.a && x.a.submitted ? '🔒 Yes' : 'No'}</td><td></td><td><button class="btn sm" data-act="scope" data-kind="region" data-id="${x.rid}">Enter</button></td></tr>`).join('')}
     </tbody></table></div>${us.length ? '' : '<p class="note">No branches open this month.</p>'}</div>`;
@@ -1653,6 +1671,7 @@ function entryCard(t) {
 }
 
 // ---------- Variance analysis ----------
+const varTitle = (n, ms) => VAR_REPORTS[n - 1][1].replace('budget', bpLabel(ms).toLowerCase());
 const VAR_REPORTS = [[1, 'Actual P&L vs budget'], [2, 'This month vs previous month (actuals)'], [3, 'Actual P&L vs benchmark P&L'], [4, 'Ratios: actual vs budget'], [5, 'Ratios: actual vs benchmark']];
 VIEWS.variance = {
   levers() {
@@ -1664,18 +1683,18 @@ VIEWS.variance = {
       <div class="lv-h">Alert levels</div><p class="note">Watch beyond ${al.amber}% off, Act beyond ${al.red}% off (Set-up › Benchmarks).</p>
       <p class="note">Benchmark P&L = this month's actual sales with the benchmark ratios applied.</p>`;
   },
-  main() { const ms = perMonths('var'); return `<div class="card"><header><h2>${esc(VAR_REPORTS[ui.varRep - 1][1])}${ui.daily && ui.varRep < 4 ? ' · per day' : ''}</h2><span class="btns">${ui.varRep < 4 ? daySeg() : ''}<span class="note dt">${esc(scopeName(ui.scope))} · ${perLabel('var')}</span></span></header>${metaNotes(ui.scope, ms)}${varianceReport(ui.scope, ms, ui.varRep)}</div>`; },
+  main() { const ms = perMonths('var'); return `<div class="card"><header><h2>${esc(varTitle(ui.varRep, ms))}${ui.daily && ui.varRep < 4 ? ' · per day' : ''}</h2><span class="btns">${ui.varRep < 4 ? daySeg() : ''}<span class="note dt">${esc(scopeName(ui.scope))} · ${perLabel('var')}</span></span></header>${metaNotes(ui.scope, ms)}${varianceReport(ui.scope, ms, ui.varRep)}</div>`; },
 };
 function varianceReport(sc, ms, n) {
   if (!Array.isArray(ms)) ms = [ms];
   const days = sum(ms.map(dim)), A = perDay(scopeLM(sc, ms, 'actual'), days), rest = scopeAllRest(sc), lab = ms.length === 1 ? monthLabel(ms[0]) : `${monthLabel(ms[0])} – ${monthLabel(ms[ms.length - 1])}`;
-  if (n === 1) { const B = perDay(scopeLM(sc, ms, 'budget', true), days); if (!B) return '<p class="note">No approved budget for these months.</p>'; return plTable([{ label: 'Budget', L: B }, { label: 'Actual', L: A }], { rest, cats: true, variance: [0, 1] }); }
+  if (n === 1) { const k = budgetOrPlan(ms), B = perDay(scopeLM(sc, ms, k, true), days); if (!B) return '<p class="note">No plan or budget for these months.</p>'; return plTable([{ label: bpLabel(ms), L: B }, { label: 'Actual', L: A }], { rest, cats: true, variance: [0, 1] }); }
   if (n === 2) { const pm = ms.map(m => ymAdd(m, -ms.length)), P = perDay(scopeLM(sc, pm, 'actual'), sum(pm.map(dim))), pl = pm.length === 1 ? monthLabel(pm[0]) : `${monthLabel(pm[0])} – ${monthLabel(pm[pm.length - 1])}`; return plTable([{ label: pl, L: P }, { label: lab, L: A }], { rest, cats: true, variance: [0, 1] }); }
   if (n === 3) { const K = perDay(scopeLM(sc, ms, 'bench'), days); return plTable([{ label: 'Benchmark', L: K }, { label: 'Actual', L: A }], { rest, cats: true, variance: [0, 1] }); }
-  const X = n === 4 ? scopeLM(sc, ms, 'budget', true) : scopeLM(sc, ms, 'bench');
+  const k4 = budgetOrPlan(ms), X = n === 4 ? scopeLM(sc, ms, k4, true) : scopeLM(sc, ms, 'bench');
   if (!A || !X) return `<p class="note">${!A ? 'No actuals for these months yet.' : 'No budget for these months.'}</p>`;
   const ra = ratioRows(A, { rest }), rx = Object.fromEntries(ratioRows(X, { rest }).map(r => [r.k, r]));
-  return `<div class="tw"><table class="zebra"><thead><tr><th>Ratio (share of sales)</th><th>${n === 4 ? 'Budget' : 'Benchmark'}</th><th>Actual</th><th>Difference</th><th>Status</th></tr></thead><tbody>
+  return `<div class="tw"><table class="zebra"><thead><tr><th>Ratio (share of sales)</th><th>${n === 4 ? bpLabel(ms) : 'Benchmark'}</th><th>Actual</th><th>Difference</th><th>Status</th></tr></thead><tbody>
     ${ra.map(r => { const x = rx[r.k] ? rx[r.k].v : null; if (r.v == null && x == null) return ''; const d = r.v != null && x != null ? r.v - x : null;
       const v = d == null ? null : { diff: d, good: isCostKey(r.k) ? -d : d, pct: x ? d / Math.abs(x) : null };
       return `<tr class="${r.label.startsWith('  ') ? 'sub' : ['gp', 'gc', 'nc', 'pbt', 'np'].includes(r.k) ? 'total' : ''}"><td>${esc(r.label.trim())}</td><td data-v="${x ?? ''}" data-pct="1">${pct(x)}</td><td data-v="${r.v ?? ''}" data-pct="1">${pct(r.v)}</td><td class="${v && v.good < 0 ? 'neg' : ''}" data-v="${d ?? ''}" data-pct="1">${spts(d)}</td><td>${v ? statusPill(statusOf(v, 0)) : ''}</td></tr>`; }).join('')}</tbody></table></div>`;
@@ -1692,7 +1711,7 @@ function printBudget() {
   const parts = []; for (let i = 0; i < ms.length; i += 6) parts.push([i, Math.min(ms.length, i + 6)]);
   const doc = s => { const Ls = ms.map(m => scopeL(s, m, kindOf(m))); return { title: `${b ? b.name : 'Plan (not approved)'} · ${scopeName(s)}`, meta: `Salgado Group · ${perLabel('bud')}`, html: parts.map(part => monthlyTable(Ls, sumL(Ls.filter(Boolean)), { staff: true, rest: scopeAllRest(s), part, months: ms })).join('<div style="height:10px"></div>') }; };
   const docs = [doc(sc)];
-  const wi = whatIfCard(b ? 'budget' : 'plan', 'wiB'); if (wi) docs.push({ title: `What-if scenario · ${scopeName(sc)}`, meta: `${perLabel('wi')} · ${whatIfText(ui.wiB)}`, html: wi });
+  const wi = whatIfCard(m => b && b.months.includes(m) ? 'budget' : 'plan', 'wiB'); if (wi) docs.push({ title: `What-if scenario · ${scopeName(sc)}`, meta: `${perLabel('wi')} · ${whatIfText(ui.wiB)}`, html: wi });
   if (sc.kind !== 'unit') scopeUnits(sc).forEach(u => docs.push(doc({ kind: 'unit', id: u.id })));
   printDocs(docs);
 }
@@ -1714,7 +1733,7 @@ function printActuals() {
 }
 function printVariance() {
   const sc = ui.scope, n = ui.varRep;
-  const ms = perMonths('var'), doc = s => ({ title: `${VAR_REPORTS[n - 1][1]} · ${scopeName(s)}`, meta: perLabel('var'), html: metaNotes(s, ms) + varianceReport(s, ms, n) });
+  const ms = perMonths('var'), doc = s => ({ title: `${varTitle(n, ms)} · ${scopeName(s)}`, meta: perLabel('var'), html: metaNotes(s, ms) + varianceReport(s, ms, n) });
   const docs = [doc(sc)]; if (ui.varSep && sc.kind !== 'unit') scopeUnits(sc).filter(u => ms.some(m => openIn(u, m))).forEach(u => docs.push(doc({ kind: 'unit', id: u.id })));
   printDocs(docs);
 }
@@ -1964,7 +1983,7 @@ async function sampleData(pinHash) {
   const con = bd({ short: 8000, bakery: 16000, cakes: 2000, bread: 5000, juice: 2000 }, rmB); Object.assign(con, { wastage: 25000, gaspack: 0, branchExp: 15000, ss: 57500, oh: 95000, bm: 30000 }); addUnit('u_bd_con', 'Container Box', badulla, 'outlet', con);
   data['baseR:' + badulla] = { bo: 181500, comp: 103250, ho: 250000, rmSal: 120000 };
   // Other branches (group budget files)
-  const where = { legendary: [kandy, 'main'], matale_bakery: [matale, 'main'], anuradhapura: [anu, 'main'], cake_republic: [anu, 'large'], cafe1886: [rest, 'restaurant'], gimanhala: [rest, 'restaurant'], garden_cafe: [rest, 'restaurant'], garden_club: [rest, 'restaurant'] };
+  const where = { legendary: [kandy, 'main'], matale_bakery: [matale, 'main'], anuradhapura: [anu, 'main'], cake_republic: [anu, 'main'], cafe1886: [rest, 'restaurant'], gimanhala: [rest, 'restaurant'], garden_cafe: [rest, 'restaurant'], garden_club: [rest, 'restaurant'] };
   const regTot = {};
   for (const b of SAMPLE_RAW) {
     const [rid, type] = where[b.id] || []; if (!rid) continue;
@@ -2246,8 +2265,8 @@ document.addEventListener('change', async e => {
     }
     case 'psales': case 'pmargin': {
       const u = unitById(d.uid), ym = PYM(), before = planInputs(u, ym);
-      if (ch === 'psales') { const v = Math.max(0, num(val)) * (ui.daily ? dim(ym) : 1); if (Math.round(v) === Math.round(before.salesC[d.k])) return render(); await updPlan(u, ym, p => { p.sales = p.sales || {}; p.sales[d.k] = v; }); await logChange(u, ym, 'sales.' + d.k, catById(d.k).name + ' sales', money(before.salesC[d.k]), money(v)); }
-      else { const m = Math.min(100, Math.max(-100, num(val))); if (Math.abs((100 - m) - before.rmPct[d.k]) < 0.05) return render(); await updPlan(u, ym, p => { p.rmPct = p.rmPct || {}; p.rmPct[d.k] = 100 - m; }); await logChange(u, ym, 'rm.' + d.k, d.k === '_all' ? 'Cost of sales margin' : catById(d.k).name + ' RM margin', (100 - before.rmPct[d.k]).toFixed(1) + '%', m.toFixed(1) + '%'); }
+      if (ch === 'psales') { const v = Math.max(0, num(val)) * (ui.daily ? dim(ym) : 1); if (Math.round(v) === Math.round(before.salesC[d.k])) return render(); await updPlan(u, ym, p => { p.sales = p.sales || {}; p.sales[d.k] = v / salesFactor(u, ym, d.k); }); await logChange(u, ym, 'sales.' + d.k, catById(d.k).name + ' sales', money(before.salesC[d.k]), money(v)); }
+      else { const m = Math.min(100, Math.max(-100, num(val))); if (Math.abs((100 - m) - before.rmPct[d.k]) < 0.05) return render(); await updPlan(u, ym, p => { p.rmPct = p.rmPct || {}; p.rmPct[d.k] = (100 - m) / rmFactor(u, ym, d.k === '_all' ? u.cats[0] : d.k); }); await logChange(u, ym, 'rm.' + d.k, d.k === '_all' ? 'Cost of sales margin' : catById(d.k).name + ' RM margin', (100 - before.rmPct[d.k]).toFixed(1) + '%', m.toFixed(1) + '%'); }
       return render();
     }
     case 'dectick': if (el.checked) return decToTask(d.key); return undoDecTask(d.key);
