@@ -9,7 +9,7 @@
   --good: #0a7a3a; --good-soft: #dcf1e3; --warn: #a86a00; --warn-soft: #fbedcf; --bad: #c0362f; --bad-soft: #f8dedb;
   --body: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
 }
-* { box-sizing: border-box; }a
+* { box-sizing: border-box; }
 html, body { margin: 0; }
 body { background: var(--bg); color: var(--ink); font: 14px/1.45 var(--body); font-variant-numeric: tabular-nums; }
 h1, h2, h3 { margin: 0; font-weight: 600; }
@@ -38,7 +38,7 @@ header.top { position: sticky; top: 0; z-index: 20; background: var(--surface); 
 .kpi .v { font-size: 21px; font-weight: 800; color: #000; }
 .kpi .v.neg { color: var(--bad); }
 .kpi .sub { font-size: 12px; color: var(--muted); }
-nav.tabs { display: flex; gap: 2px; padding: 0 10px; overflow-x: auto; border-top: 1px solid var(--line); }
+nav.tabs { background: var(--surface); display: flex; gap: 2px; padding: 0 10px; overflow-x: auto; border-top: 1px solid var(--line); }
 nav.tabs button { border: 0; background: none; padding: 10px 12px; cursor: pointer; color: var(--muted); font-weight: 700; border-bottom: 3px solid transparent; white-space: nowrap; }
 nav.tabs button[aria-selected="true"] { color: var(--green); border-bottom-color: var(--green); }
 nav.tabs button .later { font-size: 10.5px; color: var(--muted); margin-left: 4px; }
@@ -88,7 +88,9 @@ aside.levers { position: sticky; top: 170px; max-height: calc(100vh - 185px); ov
 .callout.bad { background: var(--bad-soft); }
 
 /* Tables */
-.tw { overflow: auto; max-height: 74vh; }
+.tw { overflow-x: auto; overflow-y: hidden; }
+.tw thead { position: relative; z-index: 4; }
+.tw thead.floating th { box-shadow: 0 2px 4px rgba(0,0,0,.12); }
 /* Frozen headings: column titles stay on top, line names stay on the left */
 .tw thead th { position: sticky; top: 0; z-index: 2; background: var(--surface); box-shadow: 0 1px 0 var(--line); }
 .tw thead tr:nth-child(2) th { top: 27px; }
@@ -170,6 +172,7 @@ input:disabled, select:disabled { background: var(--surface-2); color: var(--mut
   #printhost { display: block !important; }
   #printhost .exportbar, #printhost button, #printhost .btns:empty { display: none !important; }
   #printhost .tw { max-height: none; overflow: visible; }
+  #printhost thead { transform: none !important; }
   #printhost th, #printhost td { position: static !important; box-shadow: none !important; }
   * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   body { background: #fff; font-size: 11px; }
@@ -196,8 +199,8 @@ input:disabled, select:disabled { background: var(--surface-2); color: var(--mut
    Salgado Budget Planner · core: settings, storage and the P&L engine
    ===================================================================== */
 
-// ---------- Connection settings: filled in when the planner is hosted ----------
-// Supabase connection. Leave both empty for demo mode (this computer only).
+// ---------- Connection settings: filled in when the planner is hosted (Supabase) ----------
+// Leave both empty for demo mode (this computer only).
 const SUPABASE_URL = 'https://fsvdtgzkzjngykdetwah.supabase.co';       // e.g. https://abcdefgh.supabase.co
 const SUPABASE_KEY = 'sb_publishable_iUePfwGqClXW6k2ETtIGdQ_kwaWio_F';  // Supabase: Settings > API Keys > Publishable key (sb_publishable_…)
 const LOGIN_DOMAIN = 'salgado-planner.app'; // login name "FMbudgetplanner" = fmbudgetplanner@salgado-planner.app in Supabase
@@ -555,6 +558,9 @@ const Engine = {
 };
 const BASE_LINES = ['wastage', 'gaspack', 'branchExp', 'ss', 'oh', 'bm', 'chef', 'bo', 'comp', 'ho', 'rmSal'];
 const REG_LINES = ['bo', 'comp', 'ho', 'rmSal'];
+// Fixed costs (rupees a month): branch lines, and for restaurants their own back office. Wastage and gas & packing stay a % of sales.
+const FIX_LINES = ['ss', 'branchExp', 'oh', 'chef', 'bo', 'comp', 'ho'];
+const FIX_REG = ['bo', 'comp', 'ho'];
 
 function baseOf(u) {
   const b = Store.get('base:' + u.id) || {};
@@ -696,6 +702,8 @@ function planInputs(u, ym) {
     }
     if (isRest(u)) o.rmPct._all = u.cats.length ? o.rmPct[u.cats[0]] : bp.rm._all;
     for (const k of BASE_LINES) { o.adj[k] = isNum((p.adj || {})[k]) ? +p.adj[k] : prevPI ? prevPI.adj[k] : 0; if (isNum((p.adj || {})[k])) o.ovr['adj.' + k] = true; }
+    // Fixed costs in rupees a month, carried forward until changed with a lever.
+    o.fix = {}; for (const k of FIX_LINES) { o.fix[k] = isNum((p.fix || {})[k]) ? +p.fix[k] : prevPI ? prevPI.fix[k] : num(b[k]); if (isNum((p.fix || {})[k])) o.ovr['fix.' + k] = true; }
     // Branch manager pay (and a restaurant's regional manager pay) in rupees a month, carried forward.
     for (const k of ['bm', 'rmSal']) { o[k + 'Rs'] = isNum((p.pay || {})[k]) ? +p.pay[k] : prevPI ? prevPI[k + 'Rs'] : num(b[k]); if (isNum((p.pay || {})[k])) o.ovr['pay.' + k] = true; }
     for (const [s, x] of Object.entries(prodCostsBase(u))) {
@@ -709,6 +717,8 @@ function regionPlanInputs(rid, ym) {
   return Engine.m(`rpi:${rid}:${ym}`, () => {
     const i = monthDiff(CFG().plan.start, ym), p = planRegRec(rid)[ym] || {}, prev = i > 0 ? regionPlanInputs(rid, ymAdd(ym, -1)) : null, o = { adj: {}, ovr: {} };
     REG_LINES.forEach(k => { o.adj[k] = isNum((p.adj || {})[k]) ? +p.adj[k] : prev ? prev.adj[k] : 0; if (isNum((p.adj || {})[k])) o.ovr[k] = true; });
+    // Regional costs: fixed rupees for the whole region; re-shared when branches open, changed only with the levers.
+    const br = baseRegion(rid); o.fix = {}; FIX_REG.forEach(k => { o.fix[k] = isNum((p.fix || {})[k]) ? +p.fix[k] : prev ? prev.fix[k] : br[k]; if (isNum((p.fix || {})[k])) o.ovr['fix.' + k] = true; });
     o.rmSalRs = isNum((p.pay || {}).rmSal) ? +p.pay.rmSal : prev ? prev.rmSalRs : baseRegion(rid).rmSal; // regional manager pay, Rs a month for the region
     // Cumulative price and raw material indices since the plan started (for display).
     const pf = priceInfl(rid, ym); o.priceIdx = (prev ? prev.priceIdx : 1) * factorOf(pf.price); o.inflIdx = (prev ? prev.inflIdx : 1) * factorOf(pf.infl);
@@ -722,17 +732,18 @@ function regionPlan(rid, ym) {
       const pi = planInputs(u, ym), bp = basePct(u), L = blankL();
       u.cats.forEach(c => { L.salesC[c] = Math.max(0, pi.salesC[c]); putCost(L, u, c, pi.rmPct[c]); });
       const S = sum(Object.values(L.salesC)), f = k => Math.max(0, S * (bp[k] + pi.adj[k] / 100));
-      ['wastage', 'gaspack', 'ss', 'oh', 'chef'].forEach(k => { L[k] = f(k); });
+      ['wastage', 'gaspack'].forEach(k => { L[k] = f(k); });
+      L.ss = pi.fix.ss; L.oh = pi.fix.oh; L.chef = isRest(u) ? pi.fix.chef : 0; L.branchExp = pi.fix.branchExp;
       L.bm = pi.bmRs; if (isRest(u)) L.wastage = 0;
-      L.capex = pi.capex; L.maint = pi.maint; L.branchExp = f('branchExp'); L.oh += pi.maint;
-      if (isRest(u)) { REG_LINES.forEach(k => { L[k] = f(k); }); L.rmSal = pi.rmSalRs; }
+      L.capex = pi.capex; L.maint = pi.maint; L.oh += pi.maint;
+      if (isRest(u)) { FIX_REG.forEach(k => { L[k] = pi.fix[k]; }); L.rmSal = pi.rmSalRs; }
       for (const s of Object.keys(pi.heads)) L.prodS[s] = num(pi.heads[s]) * num(pi.salary[s]);
       out[u.id] = L;
     }
     setSecSales(us, out); setTransferIncome(us, out);
     if (!isRestRegion(rid)) {
-      const R = sum(us.map(u => sum(Object.values(out[u.id].salesC)))), bp = baseRegionPct(rid), ri = regionPlanInputs(rid, ym);
-      distributeRegional(us, out, Object.fromEntries(REG_LINES.map(k => [k, k === 'rmSal' ? ri.rmSalRs : Math.max(0, R * (bp[k] + ri.adj[k] / 100))])));
+      const ri = regionPlanInputs(rid, ym);
+      distributeRegional(us, out, Object.fromEntries(REG_LINES.map(k => [k, k === 'rmSal' ? ri.rmSalRs : Math.max(0, ri.fix[k])])));
     }
     us.forEach(u => finalize(out[u.id], u));
     return out;
@@ -993,7 +1004,7 @@ const XLSX = (() => {
    ===================================================================== */
 const ui = {
   scope: { kind: 'group' }, tab: 'overview', ym: null, setup: null, menu: false, unlockUntil: 0, staffView: false,
-  wiB: {}, wiA: {}, planToday: false, planDaily: false, varRep: 1, varSep: false, actType: 'month', actPeriod: null,
+  wiB: {}, wiA: {}, planToday: false, daily: false, varRep: 1, varSep: false, actType: 'month', actPeriod: null,
   decTab: 'pending', openTask: null, baseSel: null, showCats: false, menuRegion: null, setupOpen: false,
   per: {}, // period pickers: bud {from, n}; wi / var {from, to}
 };
@@ -1064,6 +1075,7 @@ function render() {
   }
   app.innerHTML = headerHtml() + body + (ui.menu ? menuHtml() : '');
   const mainEl = $('#main'); if (mainEl && !ui.setup) mainEl.insertAdjacentHTML('afterbegin', exportBar());
+  formatNumberInputs(); stickyHeads();
   const asideEl = $('aside.levers'); if (asideEl) asideEl.scrollTop = asideTop;
   document.querySelectorAll('#main .tw').forEach((e, i) => { if (twPos[i]) { e.scrollLeft = twPos[i][0]; e.scrollTop = twPos[i][1]; } });
   if (focusId) { const el = document.getElementById(focusId); if (el) { el.focus({ preventScroll: true }); if (sel && el.setSelectionRange) try { el.setSelectionRange(sel[0], sel[1]); } catch (e) { /* ignore */ } } }
@@ -1071,6 +1083,23 @@ function render() {
   afterRender.forEach(f => f()); afterRender.length = 0;
 }
 const afterRender = [];
+// Thousand separators in number boxes (10000000 shows as 10,000,000). Typing is unchanged; commas are ignored when saving.
+function formatNumberInputs() {
+  document.querySelectorAll('#app input.num').forEach(i => { const v = i.value.replace(/,/g, ''); if (/^-?\d{4,}(\.\d+)?$/.test(v)) { const [a, b] = v.split('.'); i.value = (+a).toLocaleString('en-US') + (b ? '.' + b : ''); } });
+}
+// Frozen headings: while the page scrolls, each table's heading row slides down to stay just under the top bar.
+// (The first column stays put when a wide table scrolls sideways.)
+function stickyHeads() {
+  const top = ($('header.top') || { getBoundingClientRect: () => ({ bottom: 0 }) }).getBoundingClientRect().bottom;
+  document.querySelectorAll('#main .tw, .shell .tw').forEach(tw => {
+    const th = tw.querySelector('thead'); if (!th) return;
+    const r = tw.getBoundingClientRect(), max = Math.max(0, tw.clientHeight - th.offsetHeight - 24), off = Math.min(max, Math.max(0, top - r.top));
+    th.style.transform = off > 0 ? `translateY(${off}px)` : '';
+    th.classList.toggle('floating', off > 0);
+  });
+}
+window.addEventListener('scroll', () => stickyHeads(), { passive: true });
+window.addEventListener('resize', () => stickyHeads());
 
 function loginHtml() {
   return `<div class="login"><div class="card"><h1>Salgado Budget Planner</h1><p class="note">Sign in with the team login.</p>
@@ -1143,6 +1172,9 @@ function metaNotes(scope, ymOrMonths) {
   if (none === ms.length) return `<div class="callout warn">No actual figures entered for ${multi ? 'these months' : 'this month'} yet.</div>`;
   return out.length ? `<div class="callout warn">${out.map(x => `<div>${x.charAt(0).toUpperCase() === '<' ? x : x.charAt(0).toUpperCase() + x.slice(1)}</div>`).join('')}</div>` : '';
 }
+// Per month / per day switch: per day = the month's figure ÷ the days in that month.
+const daySeg = () => seg('daily', ui.daily, [[false, 'Per month'], [true, 'Per day']]);
+const perDay = (L, days) => L && ui.daily ? scaleL(L, 1 / days) : L;
 const seg = (act, cur, opts) => `<div class="seg" role="group">${opts.map(([v, l]) => `<button data-act="${act}" data-v="${v}" aria-pressed="${String(cur) === String(v)}">${esc(l)}</button>`).join('')}</div>`;
 function stepper(id, value, step, attrs) { return `<span class="stepper"><button data-act="step" data-d="-${step}" ${attrs} aria-label="Less">−</button><input class="num" id="${id}" value="${value}" ${attrs.replace('data-act="step"', '')} data-ch="stepval"><button data-act="step" data-d="${step}" ${attrs} aria-label="More">+</button></span>`; }
 
@@ -1254,14 +1286,16 @@ VIEWS.planner = {
     const pi = planInputs(u, PYM()), bp = basePct(u), S = sum(Object.values(pi.salesC));
     const row = k => { const now = bp[k] + pi.adj[k] / 100; return `<div class="lv"><div class="nm">${esc(LEVER_LABEL[k] || lineLabel(k))}<small>today ${pct(bp[k])} → ${pct(now)} of sales · ${money(S * now)}</small></div>${stepper(`adj-${k}`, (+pi.adj[k]).toFixed(1), 0.5, `data-act="step" data-kind="adj" data-k="${k}"`)}</div>`; };
     const P = regionPlan(u.regionId, PYM())[u.id];
-    const secs = Object.keys(pi.heads);
-    return head + priceLeversHtml(u.regionId, PYM()) + `<p class="note" style="margin-top:8px">Costs are a share of this month's sales: today's share plus or minus your change (in % points). Changes carry into later months.</p>
-      <div class="lv-h">Branch costs (% of sales)</div>${[...(isRest(u) ? [] : ['wastage']), 'gaspack', 'branchExp'].map(row).join('')}
+    const secs = Object.keys(pi.heads), b0 = baseOf(u);
+    const fixRow = k => `<div class="lv"><div class="nm">${esc(LEVER_LABEL[k] || lineLabel(k).replace('of which ', ''))}<small>today ${money(b0[k])} → ${money(pi.fix[k])} a month</small></div><div class="pay">${stepper(`fix-${k}`, Math.round(pi.fix[k]), 5000, `data-act="step" data-kind="fix" data-k="${k}"`)}</div></div>`;
+    return head + priceLeversHtml(u.regionId, PYM()) + `<p class="note" style="margin-top:8px">Wastage and gas & packing are a share of sales. Staff, branch expenses and overheads are fixed rupees a month. Every change carries into later months until changed again.</p>
+      <div class="lv-h">Variable costs (% of sales)</div>${[...(isRest(u) ? [] : ['wastage']), 'gaspack'].map(row).join('')}
+      <div class="lv-h">Fixed branch costs (Rs a month)</div>${fixRow('branchExp')}
       <div class="lv"><div class="nm"><b>Gross contribution</b><small>sales − RM − wastage − gas & packing − branch expenses</small></div><div class="val">${P ? pct(P.gc / (P.sales || 1)) : '—'}</div></div>
       ${secs.length ? `<div class="lv-h">Production staff (people × monthly pay)</div>${secs.map(s => `<div class="lv"><div class="nm">${esc(secById(s).name)}<small>${num(pi.heads[s])} × ${full(pi.salary[s])} = ${money(num(pi.heads[s]) * num(pi.salary[s]))}${num(pi.heads[s]) !== num((baseOf(u).prod[s] || {}).heads) ? ' · <b>changed</b>' : ''}</small></div>
         <div>${stepper(`hd-${s}`, num(pi.heads[s]), 1, `data-act="step" data-kind="heads" data-k="${s}"`)}<br><input class="num" style="width:118px;margin-top:3px" id="sal-${s}" data-ch="salary" data-k="${s}" value="${num(pi.salary[s])}" aria-label="Monthly pay per person"></div></div>`).join('')}` : ''}
-      <div class="lv-h">Staff and overheads (% of sales)</div>${['ss', 'oh', ...(isRest(u) ? ['chef'] : [])].map(row).join('')}
-      ${isRest(u) ? `<div class="lv-h">Back office (% of the restaurant's sales)</div>${REG_LINES.filter(k => k !== 'rmSal').map(row).join('')}` : regionalLeversHtml(u.regionId, PYM())}
+      <div class="lv-h">Staff and overheads (Rs a month)</div>${['ss', 'oh', ...(isRest(u) ? ['chef'] : [])].map(fixRow).join('')}
+      ${isRest(u) ? `<div class="lv-h">Back office (Rs a month)</div>${FIX_REG.map(fixRow).join('')}` : regionalLeversHtml(u.regionId, PYM())}
       ${isUnlocked() ? `<div class="lv-h">Manager salaries (director only · Rs a month)</div>${payRow('Branch manager', 'pay-bm', pi.bmRs, 'data-act="step" data-kind="payu" data-k="bm"', 'added to branch overheads')}${isRest(u) ? payRow('Regional manager', 'pay-rmSal', pi.rmSalRs, 'data-act="step" data-kind="payu" data-k="rmSal"', 'added to back office staff') : payRow('Regional manager (whole region)', 'pay-rr', regionPlanInputs(u.regionId, PYM()).rmSalRs, `data-act="step" data-kind="payr" data-rid="${u.regionId}"`, 'shared like other regional costs, inside back office staff')}`
         : '<p class="note" style="margin-top:8px">🔒 Branch manager and regional manager salaries are adjusted separately with the director PIN. <button class="btn sm" data-act="unlock" data-level="director">Unlock</button></p>'}`;
   },
@@ -1273,24 +1307,24 @@ VIEWS.planner = {
     const tabs = period + `<div class="monthtabs" role="tablist"><button data-act="planym" data-v="today" aria-selected="${today}">Today</button>${ms.map(m => `<button data-act="planym" data-v="${m}" aria-selected="${!today && m === ui.ym}">${monthLabel(m)}${scopeL(sc, m, 'actual') ? '<span class="flag">actuals in</span>' : ''}</button>`).join('')}</div>`;
     if (today) {
       const L = scopeL(sc, null, 'base');
-      return `<div class="card"><header><h2>Today · ${esc(scopeName(sc))}</h2>${seg('plandaily', ui.planDaily, [[false, 'Monthly'], [true, 'Daily']])}</header>${tabs}
+      return `<div class="card"><header><h2>Today · ${esc(scopeName(sc))}</h2>${daySeg()}</header>${tabs}
         <p class="note">Base figures for a normal month, entered under Set-up › Base figures. Future months start from these.</p>
-        ${L ? plTable([{ label: ui.planDaily ? 'Per day' : 'Per month', L: ui.planDaily ? scaleL(L, 1 / 30) : L }], { cats: true, rest: scopeAllRest(sc), pctOfSales: true }) : '<p class="note">No base figures yet.</p>'}</div>`;
+        ${L ? plTable([{ label: ui.daily ? 'Per day' : 'Per month', L: ui.daily ? scaleL(L, 1 / dim(thisYm())) : L }], { cats: true, rest: scopeAllRest(sc), pctOfSales: true }) : '<p class="note">No base figures yet.</p>'}</div>`;
     }
     if (!ms.includes(ui.ym)) return `<div class="card"><header><h2>${esc(scopeName(sc))}</h2></header>${tabs}<p class="callout warn">${monthLabel(ui.ym)} is outside the plan period (${monthLabel(ms[0])} – ${monthLabel(ms[ms.length - 1])}). Pick a month above or change the plan period in the levers.</p></div>`;
     const ym = PYM(), us = scopeUnits(sc).filter(u => openIn(u, ym));
     const L = scopeL(sc, ym, 'plan');
     const extras = sc.kind === 'group' ? '' : `<div class="grid2">${capexCard(us, ym)}${openingCard(sc, ym)}</div>`;
-    return `<div class="card"><header><h2>${esc(scopeName(sc))} · ${monthLabel(ym)}</h2><span class="note">Plan</span></header>${tabs}</div>${extras}
+    return `<div class="card"><header><h2>${esc(scopeName(sc))} · ${monthLabel(ym)}</h2><span class="btns">${daySeg()}<span class="note">Plan${ui.daily ? ` · per day (÷ ${dim(ym)} days)` : ''}</span></span></header>${tabs}</div>${extras}
       ${sc.kind === 'group' ? '' : salesTableCard(us, ym)}
-      <div class="card"><header><h2>Planned P&L · ${monthLabel(ym)}</h2><label class="tick"><input type="checkbox" data-ch="showcats" ${ui.showCats ? 'checked' : ''}> sales by category</label></header>${plTable([{ label: monthLabel(ym), L }], { cats: ui.showCats, rest: scopeAllRest(sc), pctOfSales: true })}</div>`;
+      <div class="card"><header><h2>Planned P&L · ${monthLabel(ym)}</h2><label class="tick"><input type="checkbox" data-ch="showcats" ${ui.showCats ? 'checked' : ''}> sales by category</label></header>${plTable([{ label: monthLabel(ym) + (ui.daily ? ' · per day' : ''), L: perDay(L, dim(ym)) }], { cats: ui.showCats, rest: scopeAllRest(sc), pctOfSales: true })}</div>`;
   },
 };
 function scaleL(L, f) { const X = clone(L); for (const [k, v] of Object.entries(X)) { if (typeof v === 'number' && k !== 'n') X[k] = v * f; else if (v && typeof v === 'object') for (const kk of Object.keys(v)) v[kk] *= f; } return X; }
 function todayLeversHtml(u) {
-  const b = baseOf(u), L = baseRegionPL(u.regionId)[u.id], f = ui.planDaily ? 1 / 30 : 1, m = v => money(v * f);
+  const b = baseOf(u), L = baseRegionPL(u.regionId)[u.id], f = ui.daily ? 1 / dim(thisYm()) : 1, m = v => money(v * f);
   if (!L) return '<p class="note">No base figures yet.</p>';
-  return `<div style="margin:8px 0">${seg('plandaily', ui.planDaily, [[false, 'Monthly'], [true, 'Daily']])}</div>
+  return `<div style="margin:8px 0">${daySeg()}</div>
     <p class="note">Today's figures (base). Change them under Set-up › Base figures, with the PIN.</p>
     <div class="lv-h">Product categories</div>${isRest(u) ? `<p class="note">One cost of sales for the restaurant: ${pct(L.sales ? L.rm / L.sales : null)} of sales.</p>` : ''}${u.cats.map(c => `<div class="lv"><div class="nm">${esc(catById(c).name)}<small>${m(num(b.sales[c]))}${isRest(u) ? '' : ` · RM ${pct(num(b.sales[c]) ? num(b.rm[c]) / num(b.sales[c]) : null)}`}</small></div><button class="btn sm danger" data-act="cat-remove" data-k="${c}" title="Remove this category from ${esc(u.name)}">✕</button></div>`).join('')}
     <div class="lv-h">Costs</div>${['wastage', 'gaspack', 'branchExp'].map(k => `<div class="lv"><div class="nm">${esc(lineLabel(k))}</div><div class="val">${m(L[k])}</div></div>`).join('')}
@@ -1316,8 +1350,8 @@ function priceLeversHtml(rid, ym) {
       ${cats.map(c => `<div class="lv"><div class="nm">${esc(catById(c).name)}<small>price %${rest ? '' : ' · inflation %'}</small></div><div>${st('price', c)}${rest ? '' : '<br>' + st('infl', c)}</div></div>`).join('')}</details>`;
 }
 function regionalLeversHtml(rid, ym) {
-  const ri = regionPlanInputs(rid, ym), bp = baseRegionPct(rid), R = sum(unitsIn(rid).filter(u => openIn(u, ym)).map(u => (regionPlan(rid, ym)[u.id] || {}).sales || 0));
-  return `<div class="lv-h">Regional costs (% of regional sales · whole region)</div>${REG_LINES.filter(k => k !== 'rmSal').map(k => { const now = bp[k] + ri.adj[k] / 100; return `<div class="lv"><div class="nm">${esc(LEVER_LABEL[k] || lineLabel(k))}<small>today ${pct(bp[k])} → ${pct(now)} · ${money(R * now)}</small></div>${stepper(`radj-${k}`, (+ri.adj[k]).toFixed(1), 0.5, `data-act="step" data-kind="radj" data-k="${k}" data-rid="${rid}"`)}</div>`; }).join('')}`;
+  const ri = regionPlanInputs(rid, ym), br = baseRegion(rid);
+  return `<div class="lv-h">Regional costs (Rs a month · whole region, shared by the distribution %)</div>${FIX_REG.map(k => `<div class="lv"><div class="nm">${esc(LEVER_LABEL[k] || lineLabel(k))}<small>today ${money(br[k])} → ${money(ri.fix[k])} a month</small></div><div class="pay">${stepper(`rfix-${k}`, Math.round(ri.fix[k]), 5000, `data-act="step" data-kind="rfix" data-k="${k}" data-rid="${rid}"`)}</div></div>`).join('')}`;
 }
 function capexCard(us, ym) {
   const staff = [];
@@ -1325,7 +1359,7 @@ function capexCard(us, ym) {
   return `<div class="card"><h2>Capex, maintenance & staff · ${monthLabel(ym)}</h2>
     <div class="tw"><table><thead><tr><th>Branch</th><th>Capex (Rs)</th><th>Maintenance (Rs)</th></tr></thead><tbody>${us.map(u => { const p = planRec(u)[ym] || {}; return `<tr><td>${esc(u.name)}</td><td><input class="num" id="cx-${u.id}" data-ch="capex" data-uid="${u.id}" data-k="capex" value="${isNum(p.capex) ? p.capex : ''}" placeholder="0"></td><td><input class="num" id="mt-${u.id}" data-ch="capex" data-uid="${u.id}" data-k="maint" value="${isNum(p.maint) ? p.maint : ''}" placeholder="0"></td></tr>`; }).join('')}</tbody></table></div>
     <p class="note">Small items, charged in full to this month under branch expenses. Each entry adds a task on Decisions & actions.</p>
-    <div class="lv-h">Staff recruited or removed this month (from the levers)</div>${staff.length ? staff.map(x => `<div>${x.d > 0 ? 'Recruit' : 'Remove'} ${Math.abs(x.d)} · ${esc(secById(x.s).name)} at ${esc(x.u.name)} (now ${x.to}) <span class="pill good">task added</span></div>`).join('') : '<p class="note">No staff changes this month.</p>'}</div>`;
+    <div class="lv-h">Staff recruited or removed this month (from the levers)</div>${staff.length ? staff.map(x => { const key = `task:staff:${x.u.id}:${ym}:${x.s}`, has = !!Store.get(key); return `<div style="margin:3px 0">${x.d > 0 ? 'Recruit' : 'Remove'} ${Math.abs(x.d)} · ${esc(secById(x.s).name)} at ${esc(x.u.name)} (now ${x.to}) ${has ? '<span class="pill good">event on Decisions & actions</span>' : `<span class="pill">no event</span> <button class="btn sm" data-act="staff-task" data-uid="${x.u.id}" data-key="${key}">Add event</button>`}</div>`; }).join('') : '<p class="note">No staff changes this month.</p>'}</div>`;
 }
 function openingCard(sc, ym) {
   const c = CFG(), regs = sc.kind === 'unit' ? [regionById(unitById(sc.id).regionId)] : sc.kind === 'region' ? [regionById(sc.id)] : c.regions;
@@ -1345,15 +1379,15 @@ function salesTableCard(us, ym) {
     if (!u.cats.includes(c)) return '<td class="note">—</td><td></td>';
     const os = pi.ovr['sales.' + c], or = pi.ovr['rm.' + c];
     const tick = f => { const d = decs[`dec:chg:${u.id}:${ym}:${f}`]; return d ? `<label class="tick" title="Make this change a task"><input type="checkbox" data-ch="dectick" data-key="dec:chg:${u.id}:${ym}:${f}" ${d.status === 'tasked' ? 'checked' : ''}>task</label>` : ''; };
-    return `<td><div class="cellpair"><input class="num${os ? ' ovr' : ''}" id="ps-${u.id}-${c}" data-ch="psales" data-uid="${u.id}" data-k="${c}" value="${Math.round(pi.salesC[c])}" aria-label="${esc(u.name)} ${esc(catById(c).name)} sales">${os ? `<button class="reset" data-act="preset" data-uid="${u.id}" data-f="sales" data-k="${c}" title="Back to the default">↺</button>` : ''}${tick('sales.' + c)}</div></td>
-      ${isRest(u) ? '<td class="note">one margin ↓</td>' : `<td><div class="cellpair"><input class="num${or ? ' ovr' : ''}" style="min-width:58px;width:64px" id="pm-${u.id}-${c}" data-ch="pmargin" data-uid="${u.id}" data-k="${c}" value="${(100 - pi.rmPct[c]).toFixed(1)}" aria-label="${esc(u.name)} ${esc(catById(c).name)} raw material margin %">${or ? `<button class="reset" data-act="preset" data-uid="${u.id}" data-f="rmPct" data-k="${c}" title="Back to the default">↺</button>` : ''}${tick('rm.' + c)}</div></td>`}`;
+    return `<td><div class="cellpair"><input class="num${os ? ' ovr' : ''}" id="ps-${u.id}-${c}" data-ch="psales" data-uid="${u.id}" data-k="${c}" value="${Math.round(pi.salesC[c] / (ui.daily ? dim(ym) : 1))}" aria-label="${esc(u.name)} ${esc(catById(c).name)} sales">${os ? `<button class="reset" data-act="preset" data-uid="${u.id}" data-f="sales" data-k="${c}" title="Back to the default">↺</button>` : ''}${tick('sales.' + c)}</div></td>
+      ${isRest(u) ? '<td class="note">one margin ↓</td>' : `<td><div class="cellpair"><input class="num${or ? ' ovr' : ''}" style="min-width:58px;width:64px" id="pm-${u.id}-${c}" data-ch="pmargin" data-uid="${u.id}" data-k="${c}" value="${(100 - pi.rmPct[c]).toFixed(1)}" aria-label="${esc(u.name)} ${esc(catById(c).name)} gross profit %">${or ? `<button class="reset" data-act="preset" data-uid="${u.id}" data-f="rmPct" data-k="${c}" title="Back to the default">↺</button>` : ''}${tick('rm.' + c)}</div></td>`}`;
   };
-  return `<div class="card"><header><h2>Sales by outlet · ${monthLabel(ym)}</h2><span class="note">Default: last month's actual if entered, otherwise last month's plan. Changed figures turn amber; tick "task" to follow one up.</span></header>
-    <div class="tw"><table><thead><tr><th rowspan="2">Category</th>${us.map(u => `<th colspan="2" class="l">${esc(u.name)}</th>`).join('')}</tr><tr>${us.map(() => '<th>Sales (Rs)</th><th>RM margin %</th>').join('')}</tr></thead><tbody>
+  return `<div class="card"><header><h2>Sales by outlet · ${monthLabel(ym)}${ui.daily ? ' · per day' : ''}</h2><span class="note">Default: last month's actual if entered, otherwise last month's plan. Changed figures turn amber; tick "task" to follow one up.</span></header>
+    <div class="tw"><table><thead><tr><th rowspan="2">Category</th>${us.map(u => `<th colspan="2" class="l">${esc(u.name)}</th>`).join('')}</tr><tr>${us.map(() => `<th>Sales (Rs${ui.daily ? ' a day' : ''})</th><th>GP %</th>`).join('')}</tr></thead><tbody>
     ${cats.map(c => `<tr><td>${esc(catById(c).name)}</td>${us.map((u, i) => cell(u, pis[i], c)).join('')}</tr>`).join('')}
     <tr class="total"><td>Total</td>${us.map((u, i) => { const S = sum(u.cats.map(c => pis[i].salesC[c])), R = sum(u.cats.map(c => pis[i].salesC[c] * pis[i].rmPct[c] / 100)), pi = pis[i];
-      if (isRest(u)) { const or = pi.ovr['rm._all'], d = decs[`dec:chg:${u.id}:${ym}:rm._all`]; return `<td data-v="${S}">${money(S)}</td><td><div class="cellpair"><input class="num${or ? ' ovr' : ''}" style="min-width:58px;width:64px" id="pm-${u.id}-_all" data-ch="pmargin" data-uid="${u.id}" data-k="_all" value="${(100 - pi.rmPct._all).toFixed(1)}" aria-label="${esc(u.name)} cost of sales margin %">${or ? `<button class="reset" data-act="preset" data-uid="${u.id}" data-f="rmPct" data-k="_all" title="Back to the default">↺</button>` : ''}${d ? `<label class="tick"><input type="checkbox" data-ch="dectick" data-key="dec:chg:${u.id}:${ym}:rm._all" ${d.status === 'tasked' ? 'checked' : ''}>task</label>` : ''}</div></td>`; }
-      return `<td data-v="${S}">${money(S)}</td><td>${S ? pct(1 - R / S) : '—'}</td>`; }).join('')}</tr></tbody></table></div></div>`;
+      if (isRest(u)) { const or = pi.ovr['rm._all'], d = decs[`dec:chg:${u.id}:${ym}:rm._all`]; return `<td data-v="${S}">${money(S / (ui.daily ? dim(ym) : 1))}</td><td><div class="cellpair"><input class="num${or ? ' ovr' : ''}" style="min-width:58px;width:64px" id="pm-${u.id}-_all" data-ch="pmargin" data-uid="${u.id}" data-k="_all" value="${(100 - pi.rmPct._all).toFixed(1)}" aria-label="${esc(u.name)} gross profit %">${or ? `<button class="reset" data-act="preset" data-uid="${u.id}" data-f="rmPct" data-k="_all" title="Back to the default">↺</button>` : ''}${d ? `<label class="tick"><input type="checkbox" data-ch="dectick" data-key="dec:chg:${u.id}:${ym}:rm._all" ${d.status === 'tasked' ? 'checked' : ''}>task</label>` : ''}</div></td>`; }
+      return `<td data-v="${S}">${money(S / (ui.daily ? dim(ym) : 1))}</td><td>${S ? pct(1 - R / S) : '—'}</td>`; }).join('')}</tr></tbody></table></div></div>`;
 }
 
 // ---------- Decisions & actions: events, each with several tasks (owner, due date, done) ----------
@@ -1447,6 +1481,7 @@ function newEventCard() {
 // Events created by the planner (staff, capex, openings): one per key, updated as the plan changes.
 async function upsertAutoTask(key, title, u, ym) {
   const old = Store.get(key);
+  if (!old && Store.get('taskdel:' + key)) return; // deleted by hand: not made again unless asked
   if (!title) { if (old && !itemsOf(old).some(i => i.done || i.owner) && !old.notes) await Store.del(key); return; }
   if (old && old.title === title) return;
   const ev = { ...(old || { status: 'pending', notes: '', createdAt: new Date().toISOString(), due: `${ym}-01`, items: [{ id: newId(), text: title, owner: '', due: `${ym}-01`, done: false }] }), title, where: u ? u.name : '', unit: u ? u.id : '', ym, source: 'auto' };
@@ -1455,7 +1490,12 @@ async function upsertAutoTask(key, title, u, ym) {
 }
 async function logChange(u, ym, field, label, from, to) {
   const key = `dec:chg:${u.id}:${ym}:${field}`, old = Store.get(key);
-  if (old && old.status === 'tasked') return;
+  if (old && old.status === 'tasked') {
+    const text = `${u.name} · ${monthLabel(ym)}: ${label} changed from ${old.from ?? from} to ${to}`;
+    if (old.task && Store.get(old.task)) await updRec(old.task, ev => { if (ev.title === old.text) ev.title = text; (ev.items || []).forEach(i => { if (i.text === old.text) i.text = text; }); });
+    await Store.set(key, { ...old, to, text });
+    return;
+  }
   const f0 = old && old.status === 'open' && old.from != null ? old.from : from;
   if (f0 === to) { if (old) await Store.del(key); return; }
   await Store.set(key, { kind: 'change', unit: u.id, where: u.name, ym, field, from: f0, to, text: `${u.name} · ${monthLabel(ym)}: ${label} changed from ${f0} to ${to}`, status: 'open', createdAt: (old && old.createdAt) || new Date().toISOString() });
@@ -1501,12 +1541,13 @@ VIEWS.budgets = {
       <div class="btns">${same ? '<button class="btn" data-act="approve">Approve a new budget (PIN)</button>' : `<button class="btn primary" data-act="approve">${b ? 'Replace the budget with the plan for ' : 'Approve the plan as the budget for '}${perLabel('bud')}${b ? ' (PIN)' : ''}</button>`}</div></header>
       ${mixed ? `<div class="callout warn">Months outside the approved budget (${ms.filter(m => !inB(m)).map(monthLabel).join(', ')}) show the plan.</div>` : ''}
       <p class="note">Branch manager pay is inside branch overheads, regional manager pay inside back office staff, chef pay inside production staff.</p></div>`;
-    const table = `<div class="card"><h2>${b && !mixed ? 'Budget' : b ? 'Budget and plan' : 'Plan'} · ${perLabel('bud')}</h2>${monthlyTable(Ls, T, { staff: true, rest: scopeAllRest(sc), months: ms })}</div>`;
+    const table = `<div class="card"><header><h2>${b && !mixed ? 'Budget' : b ? 'Budget and plan' : 'Plan'} · ${perLabel('bud')}${ui.daily ? ' · per day' : ''}</h2>${daySeg()}</header>${monthlyTable(Ls, T, { staff: true, rest: scopeAllRest(sc), months: ms })}</div>`;
     return head + whatIfCard(b ? 'budget' : 'plan', 'wiB') + table + extrasCard(b, ms);
   },
 };
 function monthlyTable(Ls, T, opts) {
   const ms = opts.months || months(), rows = plRows({ ...opts, L: T }), part = opts.part || [0, ms.length], last = part[1] >= ms.length;
+  if (ui.daily) { Ls = Ls.map((L, i) => perDay(L, dim(ms[i]))); T = perDay(T, sum(ms.map(dim))); } // per day: each month ÷ its days; total ÷ all the days
   const idx = ms.map((m, i) => i).filter(i => i >= part[0] && i < part[1]);
   return `<div class="tw"><table class="zebra"><thead><tr><th>Line</th>${idx.map(i => `<th class="dt">${monthLabel(ms[i])}</th>`).join('')}${last && ms.length > 1 ? '<th>Total</th>' : ''}</tr></thead><tbody>
     ${rows.map(r => `<tr class="${r.t}"><td>${rowPrefix(r)}${esc(lineLabel(r.k))}</td>${idx.map(i => { const L = Ls[i], v = L ? getV(L, r.k) : null; return `<td${v < 0 ? ' class="neg"' : ''} data-v="${v == null ? '' : v}">${v == null ? '—' : money(v)}</td>`; }).join('')}${last && ms.length > 1 ? `<td data-v="${getV(T, r.k)}"><b>${money(getV(T, r.k))}</b></td>` : ''}</tr>`).join('')}</tbody></table></div>`;
@@ -1623,14 +1664,14 @@ VIEWS.variance = {
       <div class="lv-h">Alert levels</div><p class="note">Watch beyond ${al.amber}% off, Act beyond ${al.red}% off (Set-up › Benchmarks).</p>
       <p class="note">Benchmark P&L = this month's actual sales with the benchmark ratios applied.</p>`;
   },
-  main() { const ms = perMonths('var'); return `<div class="card"><header><h2>${esc(VAR_REPORTS[ui.varRep - 1][1])}</h2><span class="note dt">${esc(scopeName(ui.scope))} · ${perLabel('var')}</span></header>${metaNotes(ui.scope, ms)}${varianceReport(ui.scope, ms, ui.varRep)}</div>`; },
+  main() { const ms = perMonths('var'); return `<div class="card"><header><h2>${esc(VAR_REPORTS[ui.varRep - 1][1])}${ui.daily && ui.varRep < 4 ? ' · per day' : ''}</h2><span class="btns">${ui.varRep < 4 ? daySeg() : ''}<span class="note dt">${esc(scopeName(ui.scope))} · ${perLabel('var')}</span></span></header>${metaNotes(ui.scope, ms)}${varianceReport(ui.scope, ms, ui.varRep)}</div>`; },
 };
 function varianceReport(sc, ms, n) {
   if (!Array.isArray(ms)) ms = [ms];
-  const A = scopeLM(sc, ms, 'actual'), rest = scopeAllRest(sc), lab = ms.length === 1 ? monthLabel(ms[0]) : `${monthLabel(ms[0])} – ${monthLabel(ms[ms.length - 1])}`;
-  if (n === 1) { const B = scopeLM(sc, ms, 'budget', true); if (!B) return '<p class="note">No approved budget for these months.</p>'; return plTable([{ label: 'Budget', L: B }, { label: 'Actual', L: A }], { rest, cats: true, variance: [0, 1] }); }
-  if (n === 2) { const pm = ms.map(m => ymAdd(m, -ms.length)), P = scopeLM(sc, pm, 'actual'), pl = pm.length === 1 ? monthLabel(pm[0]) : `${monthLabel(pm[0])} – ${monthLabel(pm[pm.length - 1])}`; return plTable([{ label: pl, L: P }, { label: lab, L: A }], { rest, cats: true, variance: [0, 1] }); }
-  if (n === 3) { const K = scopeLM(sc, ms, 'bench'); return plTable([{ label: 'Benchmark', L: K }, { label: 'Actual', L: A }], { rest, cats: true, variance: [0, 1] }); }
+  const days = sum(ms.map(dim)), A = perDay(scopeLM(sc, ms, 'actual'), days), rest = scopeAllRest(sc), lab = ms.length === 1 ? monthLabel(ms[0]) : `${monthLabel(ms[0])} – ${monthLabel(ms[ms.length - 1])}`;
+  if (n === 1) { const B = perDay(scopeLM(sc, ms, 'budget', true), days); if (!B) return '<p class="note">No approved budget for these months.</p>'; return plTable([{ label: 'Budget', L: B }, { label: 'Actual', L: A }], { rest, cats: true, variance: [0, 1] }); }
+  if (n === 2) { const pm = ms.map(m => ymAdd(m, -ms.length)), P = perDay(scopeLM(sc, pm, 'actual'), sum(pm.map(dim))), pl = pm.length === 1 ? monthLabel(pm[0]) : `${monthLabel(pm[0])} – ${monthLabel(pm[pm.length - 1])}`; return plTable([{ label: pl, L: P }, { label: lab, L: A }], { rest, cats: true, variance: [0, 1] }); }
+  if (n === 3) { const K = perDay(scopeLM(sc, ms, 'bench'), days); return plTable([{ label: 'Benchmark', L: K }, { label: 'Actual', L: A }], { rest, cats: true, variance: [0, 1] }); }
   const X = n === 4 ? scopeLM(sc, ms, 'budget', true) : scopeLM(sc, ms, 'bench');
   if (!A || !X) return `<p class="note">${!A ? 'No actuals for these months yet.' : 'No budget for these months.'}</p>`;
   const ra = ratioRows(A, { rest }), rx = Object.fromEntries(ratioRows(X, { rest }).map(r => [r.k, r]));
@@ -1992,7 +2033,8 @@ document.addEventListener('click', async e => {
     case 'planym': ui.planToday = d.v === 'today'; if (d.v !== 'today') { ui.ym = d.v; ui.per.var = null; ui.per.wi = null; } return go();
     case 'menu-region': ui.menuRegion = ui.menuRegion === d.id ? null : d.id; return go();
     case 'export': return doExport(d.kind);
-    case 'plandaily': ui.planDaily = d.v === 'true'; return go();
+    case 'daily': ui.daily = d.v === 'true'; return go();
+    case 'staff-task': { await Store.del('taskdel:' + d.key); const u = unitById(d.uid); await syncStaffTasks(u, d.key.split(':')[3]); toast('Event added on Decisions & actions.'); return go(); }
     case 'staffview': ui.staffView = d.v === 'true'; return go();
     case 'acttype': ui.actType = d.v; ui.actPeriod = null; return go();
     case 'dectab': ui.decTab = d.v; return go();
@@ -2027,7 +2069,7 @@ document.addEventListener('click', async e => {
     // Tasks and decisions
     case 'task-open': ui.openTask = ui.openTask === d.key ? null : d.key; return go();
     case 'ev-reopen': if (!await needOps('Reopening an event needs the operations head password or the director PIN.')) return; await saveEvent(d.key, r => { r.items.forEach(i => { i.done = false; i.doneAt = ''; }); }); ui.decTab = 'pending'; ui.openTask = d.key; return go();
-    case 'task-del': if (!await needOps('Deleting needs the operations head password or the director PIN.')) return; if (!confirm('Delete this event and all its tasks?')) return; await Store.del(d.key); ui.openTask = null; return go();
+    case 'task-del': if (!await needOps('Deleting needs the operations head password or the director PIN.')) return; if (!confirm('Delete this event and all its tasks?')) return; await Store.del(d.key); if (/^task:(staff|capex|open):/.test(d.key)) await Store.set('taskdel:' + d.key, true); ui.openTask = null; return go();
     case 'it-add': await saveEvent(d.key, r => { const last = r.items[r.items.length - 1]; r.items.push({ id: newId(), text: '', owner: '', due: (last && last.due) || addDays(todayStr(), 14), done: false }); }); return go();
     case 'it-del': if (!await needOps('Deleting a task needs the operations head password or the director PIN.')) return; await saveEvent(d.key, r => { r.items.splice(+d.n, 1); }); return go();
     case 'task-add': {
@@ -2126,13 +2168,22 @@ async function stepAction(d, delta) {
   if (d.kind === 'wirm') { const w = ui[d.w]; w.rmPts = w.rmPts || {}; w.rmPts[d.k] = Math.round((num(w.rmPts[d.k]) + delta) * 10) / 10; return render(); }
   if (d.kind === 'radj') { const cur = regionPlanInputs(d.rid, ym).adj[d.k]; return setRegAdj(d.rid, ym, d.k, cur + delta); }
   if (d.kind === 'payr') return setRegPay(d.rid, ym, regionPlanInputs(d.rid, ym).rmSalRs + delta);
+  if (d.kind === 'rfix') return setRegFix(d.rid, ym, d.k, regionPlanInputs(d.rid, ym).fix[d.k] + delta);
   if (d.kind === 'price' || d.kind === 'infl') return setPriceInfl(d.rid, ym, d.kind, d.k, num(priceInfl(d.rid, ym)[d.kind][d.k]) + delta);
   const u = unitById(ui.scope.id); if (!u) return;
   const pi = planInputs(u, ym);
   if (d.kind === 'adj') return setAdj(u, ym, d.k, pi.adj[d.k] + delta);
   if (d.kind === 'heads') return setHeads(u, ym, d.k, Math.max(0, num(pi.heads[d.k]) + delta));
   if (d.kind === 'payu') return setPay(u, ym, d.k, pi[d.k + 'Rs'] + delta);
+  if (d.kind === 'fix') return setFix(u, ym, d.k, pi.fix[d.k] + delta);
 }
+// Fixed costs: rupees a month, carried into later months.
+async function setFix(u, ym, k, v) {
+  v = Math.max(0, Math.round(v)); const before = planInputs(u, ym).fix[k];
+  await updPlan(u, ym, p => { p.fix = p.fix || {}; p.fix[k] = v; });
+  await logChange(u, ym, 'fix.' + k, lineLabel(k).replace('of which ', ''), money(before), money(v)); render();
+}
+async function setRegFix(rid, ym, k, v) { v = Math.max(0, Math.round(v)); await updRec('planR:' + rid, r => { r.m = r.m || {}; r.m[ym] = r.m[ym] || {}; r.m[ym].fix = { ...(r.m[ym].fix || {}), [k]: v }; }, { m: {} }); render(); }
 // Selling price / raw material inflation for a region, set in one month and carried on by the following months.
 async function setPriceInfl(rid, ym, kind, k, v) {
   v = Math.round(v * 10) / 10;
@@ -2180,6 +2231,8 @@ document.addEventListener('change', async e => {
       if (d.kind === 'wirm') { ui[d.w].rmPts = ui[d.w].rmPts || {}; ui[d.w].rmPts[d.k] = v; return render(); }
       if (d.kind === 'radj') return setRegAdj(d.rid, PYM(), d.k, v);
       if (d.kind === 'payr') return setRegPay(d.rid, PYM(), v);
+      if (d.kind === 'rfix') return setRegFix(d.rid, PYM(), d.k, v);
+      if (d.kind === 'fix') return setFix(unitById(ui.scope.id), PYM(), d.k, v);
       if (d.kind === 'price' || d.kind === 'infl') return setPriceInfl(d.rid, PYM(), d.kind, d.k, v);
       if (d.kind === 'payu') return setPay(unitById(ui.scope.id), PYM(), d.k, v);
       const u = unitById(ui.scope.id); if (d.kind === 'adj') return setAdj(u, PYM(), d.k, v); if (d.kind === 'heads') return setHeads(u, PYM(), d.k, Math.max(0, Math.round(v)));
@@ -2193,7 +2246,7 @@ document.addEventListener('change', async e => {
     }
     case 'psales': case 'pmargin': {
       const u = unitById(d.uid), ym = PYM(), before = planInputs(u, ym);
-      if (ch === 'psales') { const v = Math.max(0, num(val)); if (Math.round(v) === Math.round(before.salesC[d.k])) return render(); await updPlan(u, ym, p => { p.sales = p.sales || {}; p.sales[d.k] = v; }); await logChange(u, ym, 'sales.' + d.k, catById(d.k).name + ' sales', money(before.salesC[d.k]), money(v)); }
+      if (ch === 'psales') { const v = Math.max(0, num(val)) * (ui.daily ? dim(ym) : 1); if (Math.round(v) === Math.round(before.salesC[d.k])) return render(); await updPlan(u, ym, p => { p.sales = p.sales || {}; p.sales[d.k] = v; }); await logChange(u, ym, 'sales.' + d.k, catById(d.k).name + ' sales', money(before.salesC[d.k]), money(v)); }
       else { const m = Math.min(100, Math.max(-100, num(val))); if (Math.abs((100 - m) - before.rmPct[d.k]) < 0.05) return render(); await updPlan(u, ym, p => { p.rmPct = p.rmPct || {}; p.rmPct[d.k] = 100 - m; }); await logChange(u, ym, 'rm.' + d.k, d.k === '_all' ? 'Cost of sales margin' : catById(d.k).name + ' RM margin', (100 - before.rmPct[d.k]).toFixed(1) + '%', m.toFixed(1) + '%'); }
       return render();
     }
@@ -2289,7 +2342,7 @@ async function ensureConfig() {
 }
 async function startRemote() {
   Store.mode = 'remote'; render();
-  try { await Store.loadRemote(); } catch (e) { if (/401|JWT|Signed out|Not signed in/.test(e.message)) { Store.saveSession(null); return render(); } Store.error = 'Could not load: ' + e.message; }
+  try { await Store.loadRemote(); } catch (e) { if (/401|JWT/.test(e.message)) { Store.saveSession(null); return render(); } Store.error = 'Could not load: ' + e.message; }
   await ensureConfig(); render();
   clearInterval(startRemote.t); startRemote.t = setInterval(() => Store.poll(), 30000);
   window.addEventListener('focus', () => Store.poll());
